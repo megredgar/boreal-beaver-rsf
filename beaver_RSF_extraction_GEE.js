@@ -12,9 +12,8 @@
  *
  * LAND COVER: NALCMS 2020 (30 m, Landsat), already in the GEE catalog —
  *   no upload needed. ee.Image('USGS/NLCD_RELEASES/2020_REL/NALCMS')
- *   Caveat: treed bogs/fens are largely mapped as needleleaf forest, so
- *   dist_wetland mostly reflects open wetland.
- *   Used for: water, wetland, conifer, developed, and the availability mask.
+ *   Used for: conifer, developed, and the availability mask. (Its wetland class
+ *   misses treed bogs/fens, so wetlands now come from ABMI — see below.)
  *
  * BROADLEAF: SCANFI v1.2 (30 m, 2020), also in the GEE catalog.
  *   'prcB' = % broadleaf tree cover (mostly aspen/balsam poplar = beaver food).
@@ -23,30 +22,33 @@
  *   dist_deciduous and pct_broadleaf will be correlated — check |r| before
  *   putting both in one model.
  *
- * PEATLAND / WETLAND: Pontone et al. (2024) peatland sub-class map (~2020),
- *   GEE asset projects/ee-peatlandthesis/assets/PeatlandMap8b_2023_07_17
- *   (Zenodo doi:10.5281/zenodo.10627580). BOREAL FOREST ONLY — no coverage in
- *   the parkland/grassland south. So:
- *   - dist_wetland = wetland in EITHER Pontone (bog/fen/permafrost/mineral)
- *     OR NALCMS (wetland class). Province-wide, and much better than NALCMS
- *     alone inside the boreal (treed bogs/fens are no longer lost to conifer).
- *   - dist_bog, dist_fen, dist_mineral_wetland = wetland-type split, ONLY
- *     meaningful where peat_covered == 1. Outside coverage they read MAX_DIST,
- *     which is a data gap, not "far from wetland". Fit those models on the
- *     peat_covered == 1 subset only.
+ * WETLAND + WATER: ABMI Alberta Wetland Inventory (10 m, Sentinel-1/2,
+ *   province-wide: forested, prairie-pothole and mountain mapping areas).
+ *   Codes: 0 Open water, 1 Fen, 2 Bog, 3 Marsh, 4 Swamp, 5 Upland.
+ *   Used for: dist_water (ABMI open water OR NALCMS water), dist_wetland
+ *   (any of fen/bog/marsh/swamp), and the wetland-type split dist_fen,
+ *   dist_bog, dist_marsh, dist_swamp — all valid everywhere in Alberta.
+ *   The 10 m wetland masks are aggregated to 30 m with MAX, so a small pothole
+ *   anywhere in a 30 m cell still counts.
+ *   dist_wetland and the four split covariates are nested — don't fit them
+ *   together; the |r| check will flag this anyway.
  *
  * NICOLE !!! BEFORE RUNNING — upload these as assets (Assets tab > NEW):
- *   - beavers_AB.csv -> Table asset. Lat field = latitude, Long = longitude.
- *     DELETE the 'geometry' column first (the "c(-112.9, 49.6)" strings are an
- *     R/sf print artifact and will break ingestion).
+ *   - beavers_AB_clean.csv (already done) -> Table asset,
+ *     X = longitude, Y = latitude.
  *   - Roads: zip the .shp/.shx/.dbf/.prj together -> Table asset.
+ *   - ABMI wetland raster -> Image asset. Download the .tif from
+ *     https://abmi.ca/data-portal/40.html (ABMIwetlandInventory.tif, ~226 MB).
+ *     On upload: Pyramiding policy = MODE, and make sure 0 is NOT set as the
+ *     no-data value (0 = open water in this product!).
  ******************************************************************************/
 
 
 // ============================== 0. CONFIG ==================================
 var LC_ASSET    = 'USGS/NLCD_RELEASES/2020_REL/NALCMS';            // public catalog
 var SCANFI_ASSET = 'projects/gcpm041u-lemur/assets/scanfi_v12/SCANFI_v1_2'; // public catalog
-var PEAT_ASSET  = 'projects/ee-peatlandthesis/assets/PeatlandMap8b_2023_07_17'; // Pontone et al. 2024
+var WET_ASSET   = 'projects/ee-mredgar/assets/ABMIwetlandInventory';  // TODO - Nicole check path after upload
+var WET_SCALE   = 10;         // ABMI wetland inventory native resolution (m)
 var BROADLEAF_MIN = 25;      // % broadleaf cover for a pixel to count as "deciduous".
                               // Arbitrary — justify from lit or test 10/25/50 as sensitivity
 var USED_ASSET  = 'projects/ee-mredgar/assets/beavers_AB_clean';        // TODO - Nicole change this
@@ -78,14 +80,15 @@ var LC = {
   shrub:      [8],
   agriculture:[15]
 };
-// ---- Pontone et al. 2024 peatland map class codes ----
-// 1 Bog  2 Rich fen  3 Poor fen  4 Peatland permafrost complex
-// 5 Mineral wetland  6 Water  7 Uplands  8 Agriculture  9 Urban
-var PEAT = {
-  bog:      [1, 4],     // permafrost complexes are bog-dominated; rare in AB
-  fen:      [2, 3],
-  mineral:  [5],        // marsh / swamp / shallow open water
-  anyWet:   [1, 2, 3, 4, 5]
+// ---- ABMI Alberta Wetland Inventory class codes (from the ABMI metadata) ----
+// 0 Open water  1 Fen  2 Bog  3 Marsh  4 Swamp  5 Upland
+var WET = {
+  water:  [0],
+  fen:    [1],
+  bog:    [2],
+  marsh:  [3],
+  swamp:  [4],
+  anyWet: [1, 2, 3, 4]
 };
 
 // Classes that count as "available" habitat (per the proposal's land mask)
@@ -102,11 +105,8 @@ var region = alberta.geometry();
 
 var lc    = ee.Image(LC_ASSET).select('landcover').rename('lc');
 var prcB  = ee.Image(SCANFI_ASSET).select('prcB').unmask(0);   // % broadleaf cover
-var peat  = ee.Image(PEAT_ASSET).select(0).rename('peat');     // masked outside boreal
-var peatCovered = peat.mask().gt(0).unmask(0).rename('peat_covered');
+var wet   = ee.Image(WET_ASSET).select(0).rename('wet');       // ABMI wetland inventory
 
-// Confirm the peatland asset loads and check its resolution
-print('Peatland map nominal scale (m):', peat.projection().nominalScale());
 var roads = ee.FeatureCollection(ROADS_ASSET);
 var used  = ee.FeatureCollection(USED_ASSET)
   .filterBounds(region)
@@ -120,6 +120,12 @@ var testBox = ee.Geometry.Rectangle([-114.5, 53.0, -112.5, 54.5]);
 print('LC class histogram (test box):',
   lc.reduceRegion({reducer: ee.Reducer.frequencyHistogram(),
                    geometry: testBox, scale: 100, maxPixels: 1e9}));
+
+// Same check for the ABMI wetland raster — should show keys 0–5.
+// If '0' (open water) is missing, the upload treated 0 as no-data: re-upload.
+print('ABMI wetland class histogram (test box):',
+  wet.reduceRegion({reducer: ee.Reducer.frequencyHistogram(),
+                    geometry: testBox, scale: 100, maxPixels: 1e9}));
 
 
 // ========================= 2. HELPER FUNCTIONS =============================
@@ -146,9 +152,13 @@ function distToClass(codes, name) {
   return distToMask(classMask(codes), name);
 }
 
-// 0/1 image for a set of Pontone peatland classes (0 outside coverage)
-function peatMask(codes) {
-  return peat.remap(codes, ee.List.repeat(1, codes.length), 0).unmask(0);
+// 0/1 image for a set of ABMI wetland classes, aggregated 10 m -> 30 m with
+// MAX (a pothole anywhere in the 30 m cell counts).
+function wetMask(codes) {
+  return wet.remap(codes, ee.List.repeat(1, codes.length), 0)
+    .unmask(0)
+    .reproject(ee.Projection(CRS).atScale(WET_SCALE))
+    .reduceResolution({reducer: ee.Reducer.max(), maxPixels: 16});
 }
 
 
@@ -157,12 +167,13 @@ var distRoads = roads.distance({searchRadius: MAX_DIST, maxError: 10})
   .unmask(MAX_DIST).min(MAX_DIST).rename('dist_roads');
 
 var covs = ee.Image.cat([
-  distToClass(LC.water,      'dist_water'),
-  distToMask(classMask(LC.wetland).or(peatMask(PEAT.anyWet)), 'dist_wetland'),
-  distToMask(peatMask(PEAT.bog),     'dist_bog'),               // boreal only
-  distToMask(peatMask(PEAT.fen),     'dist_fen'),               // boreal only
-  distToMask(peatMask(PEAT.mineral), 'dist_mineral_wetland'),   // boreal only
-  peatCovered,                                                  // 1 = inside Pontone coverage
+  distToMask(wetMask(WET.water).or(classMask(LC.water)), 'dist_water'),  // ABMI + NALCMS
+  distToMask(wetMask(WET.anyWet), 'dist_wetland'),   // ABMI fen/bog/marsh/swamp
+  distToMask(wetMask(WET.fen),    'dist_fen'),
+  distToMask(wetMask(WET.bog),    'dist_bog'),
+  distToMask(wetMask(WET.marsh),  'dist_marsh'),
+  distToMask(wetMask(WET.swamp),  'dist_swamp'),
+  wet.rename('wet_class'),                  // ABMI class at the point (QA)
   distToMask(prcB.gte(BROADLEAF_MIN), 'dist_deciduous'),   // SCANFI broadleaf
   distToClass(LC.coniferous, 'dist_coniferous'),
   distToClass(LC.developed,  'dist_developed'),
@@ -170,8 +181,8 @@ var covs = ee.Image.cat([
   prcB.rename('pct_broadleaf'),             // SCANFI % broadleaf at the point
   lc.rename('lc_class')                     // handy for QA / summaries
 ]);
-var COV_NAMES = ['dist_water', 'dist_wetland', 'dist_bog', 'dist_fen',
-                 'dist_mineral_wetland', 'peat_covered', 'dist_deciduous',
+var COV_NAMES = ['dist_water', 'dist_wetland', 'dist_fen', 'dist_bog',
+                 'dist_marsh', 'dist_swamp', 'wet_class', 'dist_deciduous',
                  'dist_coniferous', 'dist_developed', 'dist_roads',
                  'pct_broadleaf', 'lc_class'];
 
@@ -247,9 +258,10 @@ Map.addLayer(lc, {min: 1, max: 19, palette: [
   'e9da5d','e0cd88','a07451','bad292','3f8970','6ca289','e6ad6a','a9abae',
   'db2126','4c73a1','fff7fe']}, 'NALCMS 2020', false);
 Map.addLayer(covs.select('dist_water'), {min: 0, max: 2000}, 'dist_water');
-Map.addLayer(peat, {min: 1, max: 9, palette: [
-  '4C0073','FFFF00','E64C00','727272','F4C2C2','0070FF','4C7300','623131','000000']},
-  'Pontone 2024 peatland', false);
+Map.addLayer(wet, {min: 0, max: 5, palette: [
+  '0070FF','E6A800','4C0073','00A884','5C8944','FFFFFF']},   // water fen bog marsh swamp upland
+  'ABMI wetland inventory', false);
+Map.addLayer(covs.select('dist_wetland'), {min: 0, max: 2000}, 'dist_wetland', false);
 Map.addLayer(prcB.selfMask(), {min: 0, max: 100, palette: ['yellow', 'darkgreen']},
              'SCANFI % broadleaf', false);
 Map.addLayer(covs.select('dist_deciduous'), {min: 0, max: 2000}, 'dist_deciduous', false);
