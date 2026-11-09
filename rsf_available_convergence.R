@@ -6,15 +6,13 @@
 library(dplyr)
 library(ggplot2)
 
-d <- read.csv("beaver_RSF_used_avail_covariates.csv")
-
 covs <- c("dist_water", "dist_wetland", "dist_deciduous",
           "dist_coniferous", "dist_developed", "dist_roads")
 
-used  <- filter(d, used == 1)
-avail <- filter(d, used == 0)
+used  <- filter(beaver_RSF_covariates, used == 1)
+avail <- filter(beaver_RSF_covariates, used == 0)
 
-N_grid <- c(1000, 2500, 5000, 10000, 20000, 35000, 50000)
+N_grid <- c(1000, 2500, 5000, 10000, 20000, 35000, 50000, 60000)
 n_rep  <- 10   # independent draws per N (except N = full pool)
 
 fit_once <- function(N, rep) {
