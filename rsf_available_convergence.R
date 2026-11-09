@@ -9,8 +9,8 @@ library(ggplot2)
 covs <- c("dist_water", "dist_wetland", "dist_deciduous",
           "dist_coniferous", "dist_developed", "dist_roads")
 
-used  <- filter(beaver_RSF_covariates, used == 1)
-avail <- filter(beaver_RSF_covariates, used == 0)
+used  <- filter(used_available_covariates, used == 1)
+avail <- filter(used_available_covariates, used == 0)
 
 N_grid <- c(1000, 2500, 5000, 10000, 20000, 35000, 50000, 60000)
 n_rep  <- 10   # independent draws per N (except N = full pool)
@@ -32,10 +32,16 @@ res <- bind_rows(lapply(N_grid, function(N)
   bind_rows(lapply(seq_len(ifelse(N >= nrow(avail), 1, n_rep)),
                    function(r) fit_once(N, r)))))
 
-ggplot(res, aes(N, est)) +
+convergence <- ggplot(res, aes(N, est)) +
   geom_point(alpha = 0.4) +
   stat_summary(fun = mean, geom = "line") +
   facet_wrap(~term, scales = "free_y") +
   scale_x_log10() +
   labs(x = "Number of available points", y = "Standardized coefficient") +
   theme_bw()
+
+##saving plot in high res
+pdf("rsf_available_convergence.pdf", width = 6, height = 5)
+plot(convergence) + theme_minimal()
+dev.off()
+
