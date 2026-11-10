@@ -3,6 +3,7 @@
 library(sf)
 library(dplyr)
 library(here)
+library(terra)
 
 
 ##1. Loading shapefile
@@ -25,9 +26,32 @@ joined_points <- st_join(points_sf, ecoregions_clean, join = st_intersects)
 dat <- as.data.frame(joined_points) %>% select(-geometry)
 
 # 6. Explicitly tell R it's a categorical factor variable
-dat$ecoregion <- as.factor(dat$ecoregion)
+dat$REGION_NAM <- as.factor(dat$REGION_NAM)
+
+#7. determining what ecoregion beavers most occur in based on unobserved points
+##setting the infrastructure columns to 0 which is the average and removes the observer effects
+newd <- dat
+newd$dist_developed <- 0
+newd$dist_roads     <- 0
+
+dat$pred <- predict(m_global, newdata = newd, type = "response") ##asking what would the predictive relative 
+                                                                 ##likelihood be if the distance to roads and developed were zero at every location
 
 
+dat |>
+  filter(used == 0) |>     ##filtering to unobserved               
+  group_by(REGION_NAM) |>  ##grouping by region name
+  summarise(n = n(),       
+            mean_pred   = mean(pred),
+            median_pred = median(pred)) |> ##calculating mean and median predicted occurrence likelihood
+  arrange(desc(mean_pred)) ##comparing across regions
+
+##plotting
+dat |> filter(used == 0) |>
+  ggplot(aes(reorder(REGION_NAM, pred, median), pred)) +
+  geom_boxplot() +
+  coord_flip() +
+  labs(x = NULL, y = "Predicted relative likelihood of occurrence")
 
 
 

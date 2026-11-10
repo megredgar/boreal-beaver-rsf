@@ -30,7 +30,7 @@ sc <- lapply(dat[covs], \(x) c(mean = mean(x), sd = sd(x)))
 dat[covs] <- lapply(covs, \(v) (dat[[v]] - sc[[v]][["mean"]]) / sc[[v]]["sd"])
 saveRDS(sc, "scaling.rds")
 
-## checking for collinearity
+##checking for collinearity
 cor(dat[covs])
 
 ##1. global model
@@ -63,7 +63,7 @@ d_model <- glmmTMB(used ~ dist_deciduous,
 summary(d_model)
 
 
-##4. dist to water and wetland##
+##4. dist to water and wetland
 w_model <- glmmTMB(used ~ dist_water + dist_wetland,
                    family = binomial, data = dat)
 summary(w_model)
@@ -98,19 +98,20 @@ water_model <- glmmTMB(used ~ dist_water, binomial, data = dat)
 
 bbmle::AICtab(m_null, m_wet, m_swamp, m_marsh, m_fen, m_bog, water_model, weights = TRUE)
 
+##testing whether water or wetland is overall more important
 water_model <- glmmTMB(used ~ dist_water,
                    family = binomial, data = dat)
-wetlandd_model <- glmmTMB(used ~ dist_wetland,
-                                     family = binomial, data = dat)
 
-bbmle::AICtab(water_model, wetlandd_model, weights = TRUE)
+bbmle::AICtab(water_model, wetland_m, weights = TRUE)
+
+##global model without wetland 
+m_globalwat <- glmmTMB(used ~ dist_water + dist_deciduous + dist_coniferous + dist_developed
+                       + dist_roads,
+                       family = binomial, data = dat)
+AICtab(m_global, m_globalwat)
 
 
-library(ggeffects)
-library(ggplot2)
-
-# Calculate predicted probabilities of selection
-# We look at deciduous distance across 3 representative distances to water
+#plot showing the relationship between distance to deciduous forest and distance to water 
 predictions <- predict_response(
   dfw_model, 
   terms = c("dist_deciduous [all]", "dist_water [-1, 0, 2]")
